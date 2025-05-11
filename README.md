@@ -1,81 +1,92 @@
-Так, не вдаваясь в техничку - оставляем ядро курсовой, добавляем БД для клиентов/заказов, тонкий API, мобильный «фронт» и лёгкую справочную систему. Реальное кодирование — это CRUD + два‑три экрана в React Native; безопасность ограничивается JWT, HTTPS и лимитом попыток. Этого достаточно, чтобы на защите показать «одна база → два клиента (ПК и мобильный) → встроенная справка».
-
 Что то типа плана:
-Шаг 1. Вычистить и упорядочить исходники курсовой
-1.1. Вынести логику из tkinter‑окон в отдельные файлы
-  db.py — все функции работы c SQLite
-  auth.py — регистрация/вход, хеш‑пароли (bcrypt)
-  models.py — ORM‑класс User, Log
-1.2. Переименовать GUI‑файлы (например admin_ui.py, user_ui.py) и оставить там только код интерфейса.
+Шаг 1. Рефакторинг существующей базы кода
+1.1. Разнести проект по модулям (db.py, ui_student.py, ui_teacher.py, adaptive.py, reports.py).
+1.2. Вычистить прямое обращение GUI → SQLite: все запросы в слой repository.py.
+1.3. Завести единый файл настроек config.py (пути к БД, пороги адаптации, роли).
 
-Шаг 2. Расширить базу данных для «клиентов + заказы + справка»
-2.1. Добавить таблицы
-CREATE TABLE client(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    full_name TEXT NOT NULL,
-    phone TEXT,
-    email TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+Шаг 2. Расширение схемы SQLite под учебный процесс
+-- Описания сущностей
+CREATE TABLE student( id INTEGER PRIMARY KEY, fio TEXT, group_id INT );
+CREATE TABLE teacher( id INTEGER PRIMARY KEY, fio TEXT );
+
+CREATE TABLE course( id INTEGER PRIMARY KEY, name TEXT, teacher_id INT );
+CREATE TABLE module( id INTEGER PRIMARY KEY, course_id INT, title TEXT, level INT );      -- level = «сложность»
+CREATE TABLE resource(
+    id INTEGER PRIMARY KEY,
+    module_id INT,
+    title TEXT,
+    type TEXT,                      -- ‘lecture’, ‘test’, ‘video’, ‘guide’
+    difficulty INT DEFAULT 1        -- условный показатель сложности
 );
 
-CREATE TABLE "order"(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    client_id INTEGER REFERENCES client(id),
-    status TEXT DEFAULT 'new',
-    total REAL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+-- Прогресс и оценки
+CREATE TABLE progress(
+    id INTEGER PRIMARY KEY,
+    student_id INT,
+    module_id INT,
+    score REAL,                     -- 0‑100 %
+    attempts INT DEFAULT 1,
+    updated_at DATETIME
 );
 
-CREATE TABLE faq(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    section TEXT,
-    question TEXT,
-    answer TEXT
+-- Правила/пороги адаптации
+CREATE TABLE adapt_threshold(
+    id INTEGER PRIMARY KEY,
+    min_score INT,                  -- напр. 0‑60
+    resource_type TEXT,             -- ‘guide’ / ‘video’
+    action TEXT                     -- что подсовываем
 );
-2.2. В db.py добавить CRUD‑функции add_client(), list_orders() и т.д.
+Seed‑скрипт: вставить пару правил: при score < 60 % выдаём «дополнительный разбор»; при 60–80 % — «закрепляющее видео», и т.п.
 
-Шаг 3. Сделать тонкий REST‑слой (Flask / FastAPI)
-3.1. Создать api.py:
-app = FastAPI()
+Шаг 3. Модуль адаптивной логики adaptive.py
+3.1. analyze_progress(student_id)
+Находит модули с низким баллом → выбирает подходящий ресурс по таблице adapt_threshold и сложности.
+3.2. get_recommendations(student_id)
+Возвращает JSON список [{module, resource_id, reason}].
+3.3. update_after_attempt(student_id, module_id, new_score)
+Записывает в progress, пересчитывает рекомендации.
 
-@app.post("/login")          # возвращает JWT
-@app.get ("/clients")        
-@app.post("/orders")         
-@app.get ("/faq")            
-3.2. Авторизация по JWT токену: fastapi-jwt-auth или pyjwt; хранить токен 2 ч, рефреш – сутки.
-3.3. Встроить CORS для мобильного клиента.
+Шаг 4. Изменения GUI (Tkinter/PyQt – как в курсовой)
+4.1. Роль «Студент»
+Экран «Мои курсы» – таблица модулей + текущий балл.
+Кнопка «Рекомендовано» – открывает список из adaptive.get_recommendations().
+Просмотр ресурса – открывает PDF/ссылку/тест внутри WebView.
 
-Шаг 4. Переключить десктоп‑GUI на API
-4.1. В GUI‑файлах заменить прямые запросы к SQLite на HTTP requests к localhost:8000.
-4.2. Администраторский функционал (добавление пользователей, просмотр логов) оставить локально — это «консоль админа».
+4.2. Роль «Преподаватель»
+Экран «Курсы» – CRUD модулей и ресурсов.
+Экран «Аналитика» – график среднего балла по каждому модулю (используем matplotlib).
+Настройка порогов адаптации – форма редактирования adapt_threshold.
+4.3. Роль «Администратор»
+Управление пользователями и резервное копирование БД (кнопка «Backup to zip»).
 
-Шаг 5. Мини‑справочная система
-5.1. Файл help_loader.py — заполняет таблицу faq из Markdown‑директории.
-5.2. В GUI и в API сделать эндпоинт /faq?section=orders и кнопку «Справка».
+Шаг 5. Справочная система (help‑центр)
+5.1. Таблица help_article(id, audience TEXT, title, body_md).
+5.2. В студенческом UI – раздел «Справка» с фильтром по audience='student'.
+5.3. В учительском UI – «Методические материалы» (audience='teacher').
+5.4. CRUD статей – доступен преподавателю (или админу).
 
-Шаг 6. Простейший мобильный клиент
-6.1. Самый быстрый путь — React Native + Expo.
-Экраны:
-LoginScreen (POST /login)
-ClientsScreen (GET /clients)
-OrdersScreen (GET /orders)
-HelpScreen (GET /faq)
-6.2. Собрать через expo build:android → apk; этого хватит для демонстрации.
+Шаг 6. Отчётность и визуализация
+6.1. reports.py – функции формирования CSV/Excel с успеваемостью.
+6.2. Графики:
+plt.plot(mod_names, avg_scores)      # средний балл
+plt.barh(students, debt_count)       # долги по модулям
+6.3. Экспорт отчёта в PDF (reportlab) для печати.
 
-Шаг 7. Безопасность + DevOps
-7.1. Запуск API за gunicorn + UvicornWorker → проксируем через Nginx c самоподписанным SSL.
-7.2. Limiter (slowapi) — 5 запросов логина в минуту.
-7.3. Сценарий резервного копирования: sqlite3 dump | gzip > backup.sql.gz, cron каждые 24 ч.
-7.4. Логирование: loguru → файл app.log; в десктоп‑GUI показать логи администратору.
+Шаг 7. Безопасность и устойчивость
+7.1. Пароли → bcrypt.
+7.2. Автовход отключён; сессия хранится в памяти, тайм‑аут 30 мин.
+7.3. Ежедневный авто‑backup — sqlite3 .dump | gzip (cron/TaskScheduler).
 
 Шаг 8. Тесты
-8.1. Unit: pytest для функций в db.py.
-8.2. API: pytest + httpx (проверить /login, /clients, /faq).
-8.3. Нагрузочный скрипт: locust или k6 run — 50 пользователей, 5 минут.
+unit: pytest для adaptive.py (правильный выбор ресурса).
+integration: сценарий «студент проходит тест → рекомендация меняется».
+GUI smoke: pytest-qt или pytest-tkinter – открытие главных окон без ошибок.
 
-Шаг 9. Упаковка и демонстрация
-9.1. Скрипт run_desktop.bat / .sh запускает API, потом GUI.
-9.2. Типа демонстрация:
-  – логин админа → создание клиента
-  – запуск мобильного приложения (Android эмулятор) → тот же клиент отображается
-  – кнопка «Справка» открывает FAQ
+Шаг 9. Сценарий демонстрации
+Запустить main.py – меню входа.
+Войти как Teacher → создать курс «Python Basics», добавить 2 модуля и ресурсы разных уровней.
+Войти как Student → пройти короткий тест с низким баллом → нажать «Рекомендовано» → увидеть дополнительный материал.
+Teacher открывает «Аналитику» → график успеваемости обновлён.
+Teacher создает/редактирует статью справки «Как пересдать модуль».
+Student в разделе «Справка» открывает новую статью.
+Teacher экспортирует отчёт PDF и делает резервную копию БД.
